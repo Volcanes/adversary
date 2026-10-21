@@ -1,0 +1,122 @@
+# =============================================================================
+# Mini lab: Elastic Stack (telemetry/SIEM) — Elasticsearch + Kibana
+# Caldera se levanta aparte por otro método (fuera de este compose).
+# =============================================================================
+#
+# ANTES DE ARRANCAR:
+#
+# 1. Crea un archivo ".env" junto a este compose con:
+#       ELASTIC_PASSWORD=<elige-una-contraseña-fuerte>
+#       KIBANA_PASSWORD=<elige-otra-contraseña-distinta>
+#	KIBANA_ENCRYPTION_KEY=<elige-una-contraseña-fuerte>
+#
+#
+# Presupuesto de memoria: ~16GB para la pila Elastic (ajusta ES_JAVA_OPTS y
+#
+# 2. Arrancar:
+#       docker compose up -d
+#
+# Elasticsearch : http://localhost:9200  (user: elastic / ELASTIC_PASSWORD)
+# Kibana        : http://localhost:5601  (user: elastic / ELASTIC_PASSWORD)
+#
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Contenedor de arranque único: espera a ES y fija la contraseña de kibana_system
+  # ---------------------------------------------------------------------------
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.4
+    container_name: seclab-setup
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    command: >
+      bash -c '
+        echo "Esperando a que Elasticsearch esté disponible...";
+        until curl -s http://elasticsearch:9200 -u elastic:${ELASTIC_PASSWORD} | grep -q "You Know, for Search"; do sleep 3; done;
+        echo "Fijando la contraseña de kibana_system...";
+        curl -s -X POST -u elastic:${ELASTIC_PASSWORD} -H "Content-Type: application/json" http://elasticsearch:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}";
+        echo "";
+        echo "Listo!";
+      '
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - seclab
+
+  # ---------------------------------------------------------------------------
+  # Elasticsearch (single-node, seguridad activada, TLS desactivado para el lab)
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.4
+    container_name: elasticsearch
+    environment:
+      - node.name=es01
+      - cluster.name=seclab-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - xpack.license.self_generated.type=basic
+      - "ES_JAVA_OPTS=-Xms7g -Xmx7g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    mem_limit: 14g
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - seclab
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  # ---------------------------------------------------------------------------
+  # Kibana
+  # ---------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.4
+    container_name: kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    environment:
+      - SERVERNAME=kibana
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+    mem_limit: 3g
+    ports:
+      - "5601:5601"
+    networks:
+      - seclab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+networks:
+  seclab:
+    driver: bridge
+
+volumes:
+  esdata:
+  certs:
